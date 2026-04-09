@@ -19,54 +19,57 @@ function resolveApiKey(): string | undefined {
 }
 
 export async function POST(request: Request) {
-  try {
-    const apiKey = resolveApiKey();
-    if (!apiKey) {
-      console.error('[/api/generate] ANTHROPIC_API_KEY could not be resolved');
-      return Response.json({ error: 'API key not configured' }, { status: 500 });
-    }
-
-    const anthropic = new Anthropic({ apiKey });
-
-    const body: GenerateRequest = await request.json();
-    const { mbtiType, workBackground } = body;
-
-    if (!mbtiType || typeof mbtiType !== 'string') {
-      return Response.json({ error: 'mbtiType is required' }, { status: 400 });
-    }
-
-    const type = getTypeByCode(mbtiType.toUpperCase());
-    if (!type) {
-      return Response.json({ error: 'Invalid MBTI type' }, { status: 400 });
-    }
-
-    const message = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 4096,
-      system: SYSTEM_PROMPT,
-      messages: [
-        {
-          role: 'user',
-          content: buildUserPrompt(type.code, type.archetypeName, workBackground),
-        },
-      ],
-    });
-
-    const content = message.content[0];
-    if (content.type !== 'text') {
-      return Response.json({ error: 'Unexpected response format' }, { status: 500 });
-    }
-
-    // Strip any accidental markdown fences before parsing
-    const raw = content.text.trim().replace(/^```json\s*/i, '').replace(/```\s*$/, '');
-    const profile = JSON.parse(raw);
-
-    return Response.json(profile);
-  } catch (err) {
-    console.error('[/api/generate]', err);
-    const message = err instanceof SyntaxError
-      ? 'Failed to parse AI response as JSON'
-      : 'Internal server error';
-    return Response.json({ error: message }, { status: 500 });
+  const apiKey = resolveApiKey();
+  if (!apiKey) {
+    return Response.json({ error: 'API key not configured' }, { status: 500 });
   }
+
+  const body: GenerateRequest = await request.json();
+  const { mbtiType, workBackground } = body;
+
+  if (!mbtiType || typeof mbtiType !== 'string') {
+    return Response.json({ error: 'mbtiType is required' }, { status: 400 });
+  }
+
+  const type = getTypeByCode(mbtiType.toUpperCase());
+  if (!type) {
+    return Response.json({ error: 'Invalid MBTI type' }, { status: 400 });
+  }
+
+  const anthropic = new Anthropic({ apiKey });
+
+  const stream = anthropic.messages.stream({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 4096,
+    system: SYSTEM_PROMPT,
+    messages: [
+      {
+        role: 'user',
+        content: buildUserPrompt(type.code, type.archetypeName, workBackground),
+      },
+    ],
+  });
+
+  const readable = new ReadableStream({
+    async start(controller) {
+      try {
+        for await (const chunk of stream) {
+          if (
+            chunk.type === 'content_block_delta' &&
+            chunk.delta.type === 'text_delta'
+          ) {
+            controller.enqueue(new TextEncoder().encode(chunk.delta.text));
+          }
+        }
+      } catch (err) {
+        controller.error(err);
+      } finally {
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(readable, {
+    headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+  });
 }

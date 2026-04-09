@@ -11,7 +11,7 @@ import CareerPathCard from '@/components/CareerPathCard';
 
 // ─── Loading screen ──────────────────────────────────────────────────────────
 
-function LoadingScreen({ typeName }: { typeName?: string }) {
+function LoadingScreen({ typeName, progress = 0 }: { typeName?: string; progress?: number }) {
   const phrases = [
     'Mapping your archetype...',
     'Surfacing transferable skills...',
@@ -70,11 +70,29 @@ function LoadingScreen({ typeName }: { typeName?: string }) {
           {phrases[phraseIndex]}
         </div>
 
-        {/* Decorative divider */}
-        <div className="flex items-center gap-3 mt-10 justify-center">
-          <div className="h-px w-16" style={{ background: 'rgba(201, 168, 76, 0.2)' }} />
-          <div className="w-1 h-1 rounded-full" style={{ background: 'rgba(201, 168, 76, 0.4)' }} />
-          <div className="h-px w-16" style={{ background: 'rgba(201, 168, 76, 0.2)' }} />
+        {/* Progress bar */}
+        <div className="mt-10 w-48 mx-auto">
+          <div
+            className="h-px w-full rounded-full overflow-hidden"
+            style={{ background: 'rgba(201, 168, 76, 0.15)' }}
+          >
+            <div
+              className="h-full rounded-full"
+              style={{
+                width: `${Math.max(4, progress)}%`,
+                background: 'linear-gradient(to right, rgba(201,168,76,0.4), #C9A84C)',
+                transition: 'width 0.3s ease',
+              }}
+            />
+          </div>
+          {progress > 0 && (
+            <div
+              className="text-center text-xs mt-2"
+              style={{ color: 'rgba(201, 168, 76, 0.4)', fontFamily: 'var(--font-dm-sans-variable)' }}
+            >
+              {Math.round(progress)}%
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -141,15 +159,21 @@ function ResultsContent() {
 
   const [profile, setProfile] = useState<CareerProfile | null>(null);
   const [loading, setLoading] = useState(true);
+  const [streamProgress, setStreamProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [barsActive, setBarsActive] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
   const hasFetched = useRef(false);
+  const dossierRef = useRef<HTMLDivElement>(null);
+  // Approximate expected response length for progress estimation
+  const EXPECTED_CHARS = 3800;
 
   async function fetchProfile() {
     setLoading(true);
     setError(null);
     setProfile(null);
     setBarsActive(false);
+    setStreamProgress(0);
 
     const workBackground =
       typeof window !== 'undefined'
@@ -168,7 +192,21 @@ function ResultsContent() {
         throw new Error(err.error ?? `Server error ${res.status}`);
       }
 
-      const data: CareerProfile = await res.json();
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let accumulated = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        accumulated += decoder.decode(value, { stream: true });
+        const progress = Math.min(98, (accumulated.length / EXPECTED_CHARS) * 100);
+        setStreamProgress(progress);
+      }
+
+      setStreamProgress(100);
+      const raw = accumulated.trim().replace(/^```json\s*/i, '').replace(/```\s*$/, '');
+      const data: CareerProfile = JSON.parse(raw);
       setProfile(data);
       setTimeout(() => setBarsActive(true), 600);
     } catch (err) {
@@ -188,6 +226,45 @@ function ResultsContent() {
     fetchProfile();
   }, [mbtiType]);
 
+  async function handleDownloadPDF() {
+    if (!dossierRef.current || isDownloading) return;
+    setIsDownloading(true);
+    try {
+      const html2canvas = (await import('html2canvas')).default;
+      const { jsPDF } = await import('jspdf');
+
+      const canvas = await html2canvas(dossierRef.current, {
+        scale: 2,
+        useCORS: true,
+        backgroundColor: '#0F1C2E',
+        logging: false,
+      });
+
+      const imgData = canvas.toDataURL('image/png');
+      const pdf = new jsPDF({ orientation: 'portrait', unit: 'px', format: 'a4' });
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const imgHeight = (canvas.height * pageWidth) / canvas.width;
+
+      let heightLeft = imgHeight;
+      let position = 0;
+
+      pdf.addImage(imgData, 'PNG', 0, position, pageWidth, imgHeight);
+      heightLeft -= pageHeight;
+
+      while (heightLeft > 0) {
+        position = heightLeft - imgHeight;
+        pdf.addPage();
+        pdf.addImage(imgData, 'PNG', 0, position, pageWidth, imgHeight);
+        heightLeft -= pageHeight;
+      }
+
+      pdf.save(`${mbtiType}-career-archetype.pdf`);
+    } finally {
+      setIsDownloading(false);
+    }
+  }
+
   function handleShare() {
     const url = `${window.location.origin}/results?type=${mbtiType}`;
     navigator.clipboard.writeText(url).then(() => {
@@ -197,7 +274,7 @@ function ResultsContent() {
 
   if (!typeData) return null;
 
-  if (loading) return <LoadingScreen typeName={typeData.code} />;
+  if (loading) return <LoadingScreen typeName={typeData.code} progress={streamProgress} />;
 
   if (error) {
     return (
@@ -214,7 +291,7 @@ function ResultsContent() {
   if (!profile) return null;
 
   return (
-    <div style={{ background: '#0F1C2E', minHeight: '100vh' }}>
+    <div ref={dossierRef} style={{ background: '#0F1C2E', minHeight: '100vh' }}>
 
       {/* Dossier header */}
       <div
@@ -441,16 +518,23 @@ function ResultsContent() {
                 Share my type ↗
               </button>
               <button
-                className="px-5 py-2.5 rounded-lg text-sm font-semibold cursor-not-allowed"
+                onClick={handleDownloadPDF}
+                disabled={isDownloading}
+                className="px-5 py-2.5 rounded-lg text-sm font-semibold transition-all duration-150 disabled:cursor-wait"
                 style={{
-                  border: '1px solid rgba(245, 237, 214, 0.1)',
-                  color: 'rgba(245, 237, 214, 0.3)',
+                  border: '1px solid rgba(245, 237, 214, 0.2)',
+                  color: isDownloading ? 'rgba(245, 237, 214, 0.3)' : 'rgba(245, 237, 214, 0.7)',
                   background: 'transparent',
                   fontFamily: 'var(--font-dm-sans-variable)',
                 }}
-                title="Coming soon"
+                onMouseEnter={(e) => {
+                  if (!isDownloading) e.currentTarget.style.background = 'rgba(245, 237, 214, 0.05)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = 'transparent';
+                }}
               >
-                Download PDF ↓
+                {isDownloading ? 'Generating PDF...' : 'Download PDF ↓'}
               </button>
             </div>
             <Link
