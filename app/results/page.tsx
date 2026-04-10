@@ -226,6 +226,24 @@ function ResultsContent() {
     if (!mbtiType || !typeData) { router.replace('/'); return; }
     if (hasFetched.current) return;
     hasFetched.current = true;
+
+    // If a shared link includes pre-encoded profile data, restore it directly
+    // instead of making a new API call (which would generate different wording).
+    const encodedData = searchParams.get('data');
+    if (encodedData) {
+      try {
+        const decoded: PartialProfile = JSON.parse(decodeURIComponent(escape(atob(encodedData))));
+        setProfile(decoded);
+        setSectionsLoaded(new Set(['intro', 'strengths', 'skills', 'paths', 'environment']));
+        setLoading(false);
+        setStreamProgress(100);
+        setTimeout(() => setBarsActive(true), 400);
+        return;
+      } catch {
+        // Corrupted data param — fall through to normal fetch
+      }
+    }
+
     fetchProfile();
   }, [mbtiType]);
 
@@ -235,7 +253,38 @@ function ResultsContent() {
     try {
       const html2canvas = (await import('html2canvas')).default;
       const { jsPDF } = await import('jspdf');
-      const canvas = await html2canvas(dossierRef.current, { scale: 2, useCORS: true, backgroundColor: '#0F1C2E', logging: false });
+      const canvas = await html2canvas(dossierRef.current, {
+        scale: 2,
+        useCORS: true,
+        backgroundColor: '#0F1C2E',
+        logging: false,
+        onclone: (clonedDoc) => {
+          // html2canvas resets CSS animations to frame-zero when it clones the DOM.
+          // animate-fade-in-up starts at opacity:0 (fill-mode: both), so cards go invisible.
+          // Force all animated elements to their final visible state in the clone.
+          const style = clonedDoc.createElement('style');
+          style.textContent = `
+            .animate-fade-in-up {
+              animation: none !important;
+              opacity: 1 !important;
+              transform: translateY(0) !important;
+            }
+            .animate-pulse-gold {
+              animation: none !important;
+              opacity: 1 !important;
+            }
+          `;
+          clonedDoc.head.appendChild(style);
+          // ResultSection uses inline opacity:0 until its setTimeout fires.
+          // In the clone that timer never runs, so fix those inline styles too.
+          clonedDoc.querySelectorAll<HTMLElement>('*').forEach((el) => {
+            if (el.style.opacity === '0') {
+              el.style.opacity = '1';
+              el.style.transform = 'translateY(0)';
+            }
+          });
+        },
+      });
       const imgData = canvas.toDataURL('image/png');
       const pdf = new jsPDF({ orientation: 'portrait', unit: 'px', format: 'a4' });
       const pageWidth = pdf.internal.pageSize.getWidth();
@@ -258,7 +307,17 @@ function ResultsContent() {
   }
 
   function handleShare() {
-    const url = `${window.location.origin}/results?type=${mbtiType}`;
+    let url = `${window.location.origin}/results?type=${mbtiType}`;
+    // Embed the full generated profile so the recipient sees identical results
+    // rather than triggering a fresh AI generation with different wording.
+    if (streamProgress >= 100 && Object.keys(profile).length > 0) {
+      try {
+        const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(profile))));
+        url += `&data=${encoded}`;
+      } catch {
+        // If encoding fails for any reason, fall back to type-only URL
+      }
+    }
     navigator.clipboard.writeText(url).then(() => alert('Link copied to clipboard!'));
   }
 
